@@ -716,10 +716,74 @@ const FIN_FB={diagnostic:'Revenue is growing steadily across the period, driven 
 
 async function callAPI(system,prompt){
   try{
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1100,system,messages:[{role:'user',content:prompt}]})});
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),6000);
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1100,system,messages:[{role:'user',content:prompt}]}),signal:controller.signal});
+    clearTimeout(timer);
     const d=await res.json();
     return(d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
   }catch(e){return null;}
+}
+
+// Build smart fallback commentary from real parsed numbers
+function buildFPAFallback(analysis){
+  const k=analysis.kpis;
+  const topFav=[...analysis.rows].filter(r=>r.fav).sort((a,b)=>Math.abs(b.v)-Math.abs(a.v)).slice(0,2);
+  const topUnfav=[...analysis.rows].filter(r=>!r.fav).sort((a,b)=>Math.abs(b.v)-Math.abs(a.v)).slice(0,2);
+  const rating=k.ebVar>=0?'Favorable':k.ebVar>=-k.bEB*0.05?'Mixed':'Unfavorable';
+  return{
+    executiveSummary:`The company delivered ${rating.toLowerCase()} results against budget for the period. Revenue came in ${k.revVar>=0?'above':'below'} plan at ${fK(k.aRev)} vs budget of ${fK(k.bRev)} (${fP(k.revVarP)}). Total costs ran at ${fK(k.aCost)} vs budget ${fK(k.bCost)} (${fP(k.expVarP)}). EBITDA finished at ${fK(k.aEB)}, a variance of ${fK(k.ebVar)} (${fP(k.ebVarP)}) against budget.`,
+    keyDrivers:[
+      topFav[0]?`${topFav[0].Account} was the strongest performer, coming in ${fP(topFav[0].vp)} ${topFav[0].fav?'favorable':'unfavorable'} vs budget at ${fK(topFav[0].Actual)}`:'Revenue mix performed in line with plan',
+      topFav[1]?`${topFav[1].Account} delivered a ${fP(Math.abs(topFav[1].vp))} favorable variance, contributing ${fK(Math.abs(topFav[1].v))} to the overall result`:'Cost lines broadly tracked budget expectations',
+      topUnfav[0]?`${topUnfav[0].Account} was the key area of overspend at ${fK(topUnfav[0].Actual)} vs budget ${fK(topUnfav[0].Budget)} (${fP(topUnfav[0].vp)})`:'No material unfavorable variances identified',
+    ],
+    costAnalysis:`Total operating costs of ${fK(k.aCost)} were ${k.expVar>=0?'above':'below'} budget by ${fK(Math.abs(k.expVar))} (${fP(Math.abs(k.expVarP))}). ${topUnfav[0]?topUnfav[0].Account+' was the primary driver of cost variance.':'Cost performance was broadly in line with plan.'}`,
+    risksAndOpportunities:{
+      risks:[
+        topUnfav[0]?`Continued overspend in ${topUnfav[0].Account} (${fP(topUnfav[0].vp)}) without corresponding revenue offset will pressure margins in future periods`:'Monitor cost lines for any acceleration of spend above budget',
+        `Monthly burn rate of ${fK(k.burn)} should be tracked closely; any further cost increases may require a mid-period reforecast`,
+      ],
+      opportunities:[
+        topFav[0]?`${topFav[0].Account} momentum (${fP(topFav[0].vp)} vs budget) represents an opportunity to accelerate growth investment in this area`:'Favorable variances create headroom for targeted reinvestment',
+        `Procurement and vendor contract reviews could yield additional savings to offset cost pressures elsewhere`,
+      ],
+    },
+    cashFlowObservations:`Monthly average burn rate stands at ${fK(k.burn)}. Working capital position should be reviewed given the cost variance trajectory of ${fP(k.expVarP)} against budget.`,
+    recommendations:[
+      topUnfav[0]?`Conduct a detailed review of ${topUnfav[0].Account} spend with department heads to identify savings or reforecast requirements`:'Review all cost lines above 5% unfavorable variance with budget owners',
+      topFav[0]?`Build on the ${topFav[0].Account} outperformance — assess capacity to accelerate further in the next period`:'Maintain momentum in outperforming revenue lines',
+      `Prepare a revised full-year forecast incorporating Q1 actuals and updated assumptions for the remaining periods`,
+    ],
+    overallRating:rating,
+    headline:`${rating} quarter as ${k.revVar>=0?'revenue beats':'costs exceed'} budget by ${fP(Math.abs(k.revVar>=0?k.revVarP:k.expVarP))}`,
+  };
+}
+
+function buildFINFallback(fin){
+  const pd=fin.periodData;
+  if(!pd.length)return FIN_FB;
+  const last=pd[pd.length-1],first=pd[0];
+  const revGrowth=first.revenue?((last.revenue-first.revenue)/first.revenue)*100:0;
+  const gmChg=last.grossMargin-first.grossMargin;
+  const topCost=fin.costAccounts[0];
+  const topCost2=fin.costAccounts[1];
+  const marginTrend=gmChg<-1?'declining':'stable or improving';
+  return{
+    diagnostic:`Revenue has ${revGrowth>=0?'grown':'declined'} by ${fP(Math.abs(revGrowth))} over the period, from ${fK(first.revenue)} to ${fK(last.revenue)}. Gross margin is ${marginTrend} at ${fX(last.grossMargin)} (${fP(gmChg)}pp change). Operating margin stands at ${fX(last.opMargin)}. ${topCost?topCost.account+' is the largest cost driver at '+fX(fin.totalRev?topCost.total/fin.totalRev*100:0)+'% of total revenue.':'Cost structure appears broadly in line with revenue growth.'}`,
+    marginInsights:[
+      topCost&&fin.totalRev?{severity:topCost.total/fin.totalRev>0.25?'high':'medium',text:`${topCost.account} consumes ${fX(topCost.total/fin.totalRev*100)} of revenue and is the single largest cost line — review for optimisation opportunities.`,type:topCost.total/fin.totalRev>0.25?'red':'amb'}:{severity:'medium',text:'Review the largest cost lines as a proportion of revenue to identify optimisation opportunities.',type:'amb'},
+      gmChg<-2?{severity:'high',text:`Gross margin has compressed ${fP(Math.abs(gmChg))}pp from ${fX(first.grossMargin)} to ${fX(last.grossMargin)} — investigate whether cost of goods is growing faster than pricing can absorb.`,type:'red'}:{severity:'positive',text:`Gross margin is holding at ${fX(last.grossMargin)}, indicating stable pricing power relative to direct costs.`,type:'grn'},
+      topCost2&&fin.totalRev?{severity:'medium',text:`${topCost2.account} represents ${fX(topCost2.total/fin.totalRev*100)} of revenue. Monitor whether this scales proportionally as revenue grows.`,type:'amb'}:{severity:'positive',text:'Secondary cost lines appear well-managed relative to revenue scale.',type:'grn'},
+      fin.anomalies.length>0?{severity:'medium',text:`${fin.anomalies[0].account} showed a ${fP(Math.abs(fin.anomalies[0].change))} ${fin.anomalies[0].change>0?'increase':'decrease'} period-over-period — this warrants investigation.`,type:Math.abs(fin.anomalies[0].change)>40?'red':'amb'}:{severity:'positive',text:'No significant anomalies detected. All line items are tracking within normal variance ranges.',type:'grn'},
+    ],
+    recommendations:[
+      topCost?`Conduct a detailed review of ${topCost.account} — at ${fX(fin.totalRev?topCost.total/fin.totalRev*100:0)} of revenue it represents the highest leverage opportunity for margin improvement`:'Review the top 3 cost lines for efficiency and vendor renegotiation opportunities',
+      gmChg<-1?`Address gross margin compression of ${fP(Math.abs(gmChg))}pp — consider price adjustments, supplier renegotiation or product mix optimisation`:'Maintain current gross margin discipline and monitor for any cost inflation signals',
+      `Build a 12-month rolling forecast incorporating the current trend trajectory of ${fP(revGrowth)} revenue growth and ${fX(last.opMargin)} operating margin`,
+      fin.anomalies.length>0?`Investigate the ${fP(Math.abs(fin.anomalies[0].change))} movement in ${fin.anomalies[0].account} and determine whether it is a one-off or structural shift`:'Implement monthly variance reporting to detect anomalies earlier in the cycle',
+    ],
+  };
 }
 
 async function genFPACommentary(analysis){
@@ -727,14 +791,16 @@ async function genFPACommentary(analysis){
   const ctx=`Revenue: Budget ${fK(k.bRev)} Actual ${fK(k.aRev)} (${fP(k.revVarP)}), EBITDA: Budget ${fK(k.bEB)} Actual ${fK(k.aEB)} (${fP(k.ebVarP)}), Burn: ${fK(k.burn)}/mo.`;
   const top=[...analysis.rows].sort((a,b)=>Math.abs(b.v)-Math.abs(a.v)).slice(0,4).map(r=>r.Account+':'+fP(r.vp)).join(', ');
   const txt=await callAPI('You are an experienced CFO. Return ONLY valid JSON, no markdown, no fences.',`Analyse these financials and return a board-ready commentary JSON.\n${ctx}\nTop variances: ${top}\n\nReturn exactly:\n{"executiveSummary":"...","keyDrivers":["...","...","..."],"costAnalysis":"...","risksAndOpportunities":{"risks":["...","..."],"opportunities":["...","..."]},"cashFlowObservations":"...","recommendations":["...","...","..."],"overallRating":"Favorable|Unfavorable|Mixed","headline":"8-word punchy headline"}`);
-  try{return JSON.parse(txt);}catch(e){return FPA_FB;}
+  try{if(txt)return JSON.parse(txt);}catch(e){}
+  return buildFPAFallback(analysis);
 }
 
 async function genFINCommentary(fin){
   const pd=fin.periodData,last=pd[pd.length-1]||{};
   const ctx=`Periods: ${fin.periods.join(', ')}. Latest Revenue: ${fK(last.revenue)}, Gross Margin: ${fX(last.grossMargin)}, Operating Margin: ${fX(last.opMargin)}. Top costs: ${fin.costAccounts.slice(0,5).map(c=>c.account+':'+fX(fin.totalRev?c.total/fin.totalRev*100:0)+'% of rev').join(', ')}. Anomalies: ${fin.anomalies.slice(0,3).map(a=>a.account+':'+fP(a.change)).join(', ')||'None detected'}.`;
   const txt=await callAPI('You are a senior financial analyst. Return ONLY valid JSON, no markdown, no fences.',`Analyse these financials and return detailed insights JSON.\n${ctx}\n\nReturn exactly:\n{"diagnostic":"3-4 sentence overall diagnostic mentioning specific numbers","marginInsights":[{"severity":"high|medium|positive","text":"specific insight with numbers","type":"red|amb|grn"},{"severity":"...","text":"...","type":"..."},{"severity":"...","text":"...","type":"..."},{"severity":"...","text":"...","type":"..."}],"recommendations":["specific rec 1","specific rec 2","specific rec 3","specific rec 4"]}`);
-  try{return JSON.parse(txt);}catch(e){return FIN_FB;}
+  try{if(txt)return JSON.parse(txt);}catch(e){}
+  return buildFINFallback(fin);
 }
 
 // ════════════════════════════════════════
@@ -743,7 +809,7 @@ async function genFINCommentary(fin){
 async function startFPA(){
   if(!S.fpaDemoOn&&(!S.bFile||!S.aFile)){toast('Upload both files or enable demo data','error');return;}
   g('fpaForm').style.display='none';g('fpaProc').style.display='block';
-  const steps=[['Uploading…','Preparing your files'],['Parsing…','Reading rows and columns'],['Calculating variances…','Running the variance engine'],['Generating commentary…','Analysing your financials']];
+  const steps=[['Uploading…','Preparing your files'],['Parsing…','Reading rows and columns'],['Calculating variances…','Running the variance engine'],['Generating commentary…','Building insights from your data']];
   async function step(i){g('fpaSt').textContent=steps[i][0];g('fpaDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,i===3?600:420));}
   for(let i=0;i<4;i++)await step(i);
   let data=S.fpaDemoOn?FPA_DEMO:null;
@@ -768,7 +834,7 @@ async function startFPA(){
 async function startFIN(){
   if(!S.finDemoOn&&!S.finFile){toast('Upload a file or enable demo data','error');return;}
   g('finForm').style.display='none';g('finProc').style.display='block';
-  const steps=[['Uploading…','Preparing your data'],['Detecting format…','Parsing columns and periods'],['Running analysis…','Trend, margin & cost calculations'],['Detecting anomalies…','Scanning for unusual patterns'],['Generating insights…','Analysing your financials']];
+  const steps=[['Uploading…','Preparing your data'],['Detecting format…','Parsing columns and periods'],['Running analysis…','Trend, margin & cost calculations'],['Detecting anomalies…','Scanning for unusual patterns'],['Generating insights…','Building insights from your data']];
   async function step(i){g('finSt').textContent=steps[i][0];g('finDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,i===4?700:380));}
   for(let i=0;i<5;i++)await step(i);
   let raw=S.finDemoOn?FIN_DEMO:null;
@@ -1097,8 +1163,9 @@ async function sendChat(){
   if(S.chatMode==='fin'&&S.finReport){const l=S.finReport.fin.periodData[S.finReport.fin.periodData.length-1]||{};ctx=`Financial Analysis: Revenue ${fK(l.revenue)}, Gross Margin ${fX(l.grossMargin)}, Operating Margin ${fX(l.opMargin)}. ${S.finReport.insights.diagnostic}`;}
   const txt=await callAPI(`You are a concise professional financial analyst. 2-4 sentences max unless asked for more. Context: ${ctx}`,[...S.chatHist.slice(-8)].map(m=>m.content).join('\n'));
   g('typingDot')?.remove();
-  S.chatHist.push({role:'assistant',content:txt||'Connection error. Please try again.'});
-  addBub(txt||'Connection error. Please try again.','a');
+  const reply=txt||'The commentary engine is running in offline mode. Based on the data: '+ctx;
+  S.chatHist.push({role:'assistant',content:reply});
+  addBub(reply,'a');
 }
 
 // ════════════════════════════════════════
