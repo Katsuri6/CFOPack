@@ -1,4 +1,4 @@
-[CFOPackAI_v4 (2).html](https://github.com/user-attachments/files/28011060/CFOPackAI_v4.2.html)
+[CFOPackAI_v4 (3).html](https://github.com/user-attachments/files/28012537/CFOPackAI_v4.3.html)
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -628,25 +628,46 @@ function calcFPA(data){
   const expByDept={};nr.forEach(r=>{expByDept[r.Department]=(expByDept[r.Department]||0)+r.Actual;});
   return{rows,monthly,months,expByDept,kpis:{
     bRev:bR,aRev:aR,bCost:bC,aCost:aC,bEB:bR-bC,aEB:aR-aC,
-    revVar:aR-bR,revVarP:((aR-bR)/bR)*100,
-    expVar:aC-bC,expVarP:((aC-bC)/bC)*100,
-    ebVar:(aR-aC)-(bR-bC),ebVarP:(((aR-aC)-(bR-bC))/Math.abs(bR-bC))*100,
-    burn:aC/months.length
+    revVar:aR-bR,revVarP:bR?((aR-bR)/bR)*100:0,
+    expVar:aC-bC,expVarP:bC?((aC-bC)/bC)*100:0,
+    ebVar:(aR-aC)-(bR-bC),ebVarP:(bR-bC)?((aR-aC-(bR-bC))/Math.abs(bR-bC))*100:0,
+    burn:months.length?aC/months.length:0
   }};
 }
 
 // ════════════════════════════════════════
 // FINANCIAL ANALYSIS ENGINE
 // ════════════════════════════════════════
-const KW={Revenue:['revenue','sales','income','turnover','licensing','receipts'],COGS:['cost of goods','cogs','direct labor','raw material','materials','manufacturing','hosting'],OpEx:['salary','wages','rent','electricity','utilities','telephone','internet','insurance','depreciation','marketing','advertising','r&d','research','g&a','general','admin','professional','audit','legal','travel','software']};
+
+// Revenue keywords — generous matching so "Sales Revenue", "Product Revenue", "Service Income" all work
+const REV_KW=['revenue','sales','income','turnover','licensing','receipts','service income','product revenue','services revenue'];
+const COGS_KW=['cost of goods','cogs','direct labor','raw material','material','manufacturing','hosting','cloud','infra','cost of sales','direct cost'];
+const OPEX_KW=['salary','wage','rent','electricity','utility','telephone','internet','insurance','depreciation','amortis','marketing','advertising','r&d','research','g&a','general','admin','professional','audit','legal','travel','software','subscription'];
+
 function classifyAcct(name,cat){
+  // Check the supplied category column first (exact match, case-insensitive)
+  if(cat){
+    const cl=cat.trim().toLowerCase();
+    if(cl==='revenue'||cl==='income'||cl==='sales')return'Revenue';
+    if(cl==='cogs'||cl==='cost of goods'||cl==='cost of sales')return'COGS';
+    if(cl==='opex'||cl==='operating expenses'||cl==='expenses')return'OpEx';
+    if(cl==='assets')return'Assets';
+    if(cl==='liabilities')return'Liabilities';
+    if(cl==='equity')return'Equity';
+  }
+  // Fall back to keyword matching on the account name + category
   const n=(name+' '+(cat||'')).toLowerCase();
-  for(const[k,ws]of Object.entries(KW)){if(ws.some(w=>n.includes(w)))return k;}
-  if(['cash','bank','receivable','inventory','asset','property','equipment'].some(w=>n.includes(w)))return'Assets';
-  if(['payable','loan','liability','creditor','borrowing'].some(w=>n.includes(w)))return'Liabilities';
-  if(['equity','capital','retained','reserve'].some(w=>n.includes(w)))return'Equity';
+  if(REV_KW.some(w=>n.includes(w)))return'Revenue';
+  if(COGS_KW.some(w=>n.includes(w)))return'COGS';
+  if(OPEX_KW.some(w=>n.includes(w)))return'OpEx';
+  if(['cash','bank','receivable','inventory','asset','property','equipment','fixed','prepaid','deposit'].some(w=>n.includes(w)))return'Assets';
+  if(['payable','loan','liability','creditor','borrowing','overdraft','accrual','provision'].some(w=>n.includes(w)))return'Liabilities';
+  if(['equity','capital','retained','reserve','shareholder','dividend'].some(w=>n.includes(w)))return'Equity';
   return'Other';
 }
+
+// Case-insensitive revenue check
+const isRevCat=cat=>{const c=(cat||'').toLowerCase();return c==='revenue'||c==='income'||c==='sales';};
 
 function calcFIN(raw){
   const keys=Object.keys(raw[0]);
@@ -654,42 +675,63 @@ function calcFIN(raw){
   const mCols=keys.filter(k=>MONTHS.some(m=>k.toLowerCase().startsWith(m)));
   const isWide=mCols.length>=2;
   let records=[];
+
   if(isWide){
+    // Find account and category columns case-insensitively
+    const kl=keys.map(k=>k.toLowerCase());
+    const acctKey=keys[kl.findIndex(k=>k==='account'||k==='description'||k==='name'||k==='particulars')]||keys[0];
+    const catKey=keys[kl.findIndex(k=>k==='category'||k==='type'||k==='department'||k==='group')]||null;
     raw.forEach(r=>{
+      const acctName=String(r[acctKey]||r[keys[0]]||'Unknown');
+      const catRaw=catKey?String(r[catKey]||''):'';
+      const category=classifyAcct(acctName,catRaw);
       mCols.forEach(m=>{
-        if(r[m]!=null)records.push({account:r.Account||r.Description||'Unknown',category:r.Category||r.Department||classifyAcct(r.Account||'',''),period:m,amount:+r[m]||0});
+        const val=r[m];
+        if(val!=null&&val!==''&&val!==0)
+          records.push({account:acctName,category,period:m,amount:+val||0});
       });
     });
   }else{
-    const hh=keys.map(k=>k.toLowerCase());
-    const acol=keys[hh.findIndex(h=>h.includes('account')||h.includes('description')||h.includes('name'))||0];
-    const catcol=keys[hh.findIndex(h=>h.includes('category')||h.includes('type'))];
-    const amtcol=keys[hh.findIndex(h=>h.includes('amount')||h.includes('value')||h.includes('actual')||h.includes('credit'))];
-    const pcol=keys[hh.findIndex(h=>h.includes('month')||h.includes('period'))];
+    const kl=keys.map(k=>k.toLowerCase());
+    const acol=keys[kl.findIndex(k=>k.includes('account')||k.includes('description')||k.includes('name')||k.includes('particulars'))]||keys[0];
+    const catcol=keys[kl.findIndex(k=>k.includes('category')||k.includes('type')||k.includes('department'))];
+    const amtcol=keys[kl.findIndex(k=>k.includes('amount')||k.includes('value')||k.includes('actual'))];
+    const pcol=keys[kl.findIndex(k=>k.includes('month')||k.includes('period')||k.includes('date'))];
     raw.forEach(r=>{
       const a=String(r[acol]||'Unknown');
-      const cat=catcol?String(r[catcol]||classifyAcct(a,'')):classifyAcct(a,'');
-      records.push({account:a,category:cat,period:pcol?String(r[pcol]||'Current'):'Current',amount:amtcol?+(r[amtcol]||0):0});
+      const catRaw=catcol?String(r[catcol]||''):'';
+      const cat=classifyAcct(a,catRaw);
+      const amt=amtcol?+(r[amtcol]||0):0;
+      if(amt!==0)records.push({account:a,category:cat,period:pcol?String(r[pcol]||'Current'):'Current',amount:amt});
     });
-    records=records.filter(r=>r.amount);
   }
 
   const periods=[...new Set(records.map(r=>r.period))];
-  const isRev=r=>r.category==='Revenue';
+  const isRev=r=>isRevCat(r.category);
+
   const periodData=periods.map(p=>{
     const pr=records.filter(r=>r.period===p);
-    const rev=pr.filter(isRev).reduce((s,r)=>s+r.amount,0);
+    const rev=pr.filter(isRev).reduce((s,r)=>s+Math.abs(r.amount),0);
     const cogs=pr.filter(r=>r.category==='COGS').reduce((s,r)=>s+Math.abs(r.amount),0);
     const costs=pr.filter(r=>!isRev(r)).reduce((s,r)=>s+Math.abs(r.amount),0);
-    const gross=rev-cogs,op=rev-costs;
-    return{period:p,revenue:rev,costs,cogs,grossProfit:gross,operatingProfit:op,grossMargin:rev?gross/rev*100:0,opMargin:rev?op/rev*100:0};
+    const gross=rev-cogs, op=rev-costs;
+    return{
+      period:p, revenue:rev, costs, cogs,
+      grossProfit:gross, operatingProfit:op,
+      grossMargin:rev?gross/rev*100:0,
+      opMargin:rev?op/rev*100:0
+    };
   });
 
   const acctMap={};
-  records.forEach(r=>{if(!acctMap[r.account])acctMap[r.account]={account:r.account,category:r.category,total:0,byPeriod:{}};acctMap[r.account].total+=r.amount;acctMap[r.account].byPeriod[r.period]=(acctMap[r.account].byPeriod[r.period]||0)+r.amount;});
-  const accounts=Object.values(acctMap).sort((a,b)=>Math.abs(b.total)-Math.abs(a.total));
+  records.forEach(r=>{
+    if(!acctMap[r.account])acctMap[r.account]={account:r.account,category:r.category,total:0,byPeriod:{}};
+    acctMap[r.account].total+=Math.abs(r.amount);
+    acctMap[r.account].byPeriod[r.period]=(acctMap[r.account].byPeriod[r.period]||0)+Math.abs(r.amount);
+  });
+  const accounts=Object.values(acctMap).sort((a,b)=>b.total-a.total);
   const totalRev=periodData.reduce((s,p)=>s+p.revenue,0);
-  const costAccounts=accounts.filter(a=>!isRev({category:a.category}));
+  const costAccounts=accounts.filter(a=>!isRevCat(a.category));
 
   const anomalies=[];
   accounts.forEach(a=>{
@@ -703,7 +745,8 @@ function calcFIN(raw){
   const growthRows=[];
   if(periodData.length>=2){
     const last=periodData[periodData.length-1],prev=periodData[periodData.length-2];
-    [['Revenue',last.revenue,prev.revenue],['Gross Profit',last.grossProfit,prev.grossProfit],['Operating Profit',last.operatingProfit,prev.operatingProfit],['Total Costs',last.costs,prev.costs]].forEach(([n,l,p])=>{growthRows.push({name:n,latest:l,prior:p,growth:p?((l-p)/Math.abs(p))*100:0});});
+    [['Revenue',last.revenue,prev.revenue],['Gross Profit',last.grossProfit,prev.grossProfit],['Operating Profit',last.operatingProfit,prev.operatingProfit],['Total Costs',last.costs,prev.costs]]
+      .forEach(([n,l,p])=>growthRows.push({name:n,latest:l,prior:p,growth:p?((l-p)/Math.abs(p))*100:0}));
   }
 
   return{records,periods,periodData,accounts,costAccounts,anomalies,growthRows,totalRev};
@@ -716,16 +759,8 @@ const FPA_FB={executiveSummary:'The company delivered mixed results against budg
 
 const FIN_FB={diagnostic:'Revenue is growing steadily across the period, driven primarily by Services expansion. However, margin compression is evident as hosting infrastructure and direct labor costs are growing faster than revenue. R&D investment is the primary driver of operating margin pressure, growing 36% vs 25% revenue growth.',marginInsights:[{severity:'high',text:'R&D spend has grown 36% over the period vs 25% revenue growth — this is the primary margin drag. Review headcount efficiency vs output metrics.',type:'red'},{severity:'high',text:'Hosting & infrastructure costs are scaling super-linearly with revenue, suggesting inefficient cloud spend. A cost optimisation review could recover 1-2% margin.',type:'red'},{severity:'medium',text:'G&A costs are growing at 27% — above revenue growth rate — indicating potential overhead creep. Industry benchmark: G&A should be 8-12% of revenue.',type:'amb'},{severity:'positive',text:'Services gross margin is strong and improving. This segment is the margin engine — continued investment here carries high ROI.',type:'grn'}],recommendations:['Conduct a cloud infrastructure audit — unoptimised spend likely represents 15-20% savings','Implement headcount-to-revenue ratio targets for R&D to protect operating margins','Review G&A vendor contracts and automate repetitive processes','Accelerate Services revenue mix shift — it carries the highest margin profile']};
 
-async function callAPI(system,prompt){
-  try{
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),6000);
-    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1100,system,messages:[{role:'user',content:prompt}]}),signal:controller.signal});
-    clearTimeout(timer);
-    const d=await res.json();
-    return(d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('');
-  }catch(e){return null;}
-}
+// Commentary is generated instantly from your data — no external API needed
+function callAPI(){return Promise.resolve(null);}
 
 // Build smart fallback commentary from real parsed numbers
 function buildFPAFallback(analysis){
@@ -788,20 +823,11 @@ function buildFINFallback(fin){
   };
 }
 
-async function genFPACommentary(analysis){
-  const k=analysis.kpis;
-  const ctx=`Revenue: Budget ${fK(k.bRev)} Actual ${fK(k.aRev)} (${fP(k.revVarP)}), EBITDA: Budget ${fK(k.bEB)} Actual ${fK(k.aEB)} (${fP(k.ebVarP)}), Burn: ${fK(k.burn)}/mo.`;
-  const top=[...analysis.rows].sort((a,b)=>Math.abs(b.v)-Math.abs(a.v)).slice(0,4).map(r=>r.Account+':'+fP(r.vp)).join(', ');
-  const txt=await callAPI('You are an experienced CFO. Return ONLY valid JSON, no markdown, no fences.',`Analyse these financials and return a board-ready commentary JSON.\n${ctx}\nTop variances: ${top}\n\nReturn exactly:\n{"executiveSummary":"...","keyDrivers":["...","...","..."],"costAnalysis":"...","risksAndOpportunities":{"risks":["...","..."],"opportunities":["...","..."]},"cashFlowObservations":"...","recommendations":["...","...","..."],"overallRating":"Favorable|Unfavorable|Mixed","headline":"8-word punchy headline"}`);
-  try{if(txt)return JSON.parse(txt);}catch(e){}
+function genFPACommentary(analysis){
   return buildFPAFallback(analysis);
 }
 
-async function genFINCommentary(fin){
-  const pd=fin.periodData,last=pd[pd.length-1]||{};
-  const ctx=`Periods: ${fin.periods.join(', ')}. Latest Revenue: ${fK(last.revenue)}, Gross Margin: ${fX(last.grossMargin)}, Operating Margin: ${fX(last.opMargin)}. Top costs: ${fin.costAccounts.slice(0,5).map(c=>c.account+':'+fX(fin.totalRev?c.total/fin.totalRev*100:0)+'% of rev').join(', ')}. Anomalies: ${fin.anomalies.slice(0,3).map(a=>a.account+':'+fP(a.change)).join(', ')||'None detected'}.`;
-  const txt=await callAPI('You are a senior financial analyst. Return ONLY valid JSON, no markdown, no fences.',`Analyse these financials and return detailed insights JSON.\n${ctx}\n\nReturn exactly:\n{"diagnostic":"3-4 sentence overall diagnostic mentioning specific numbers","marginInsights":[{"severity":"high|medium|positive","text":"specific insight with numbers","type":"red|amb|grn"},{"severity":"...","text":"...","type":"..."},{"severity":"...","text":"...","type":"..."},{"severity":"...","text":"...","type":"..."}],"recommendations":["specific rec 1","specific rec 2","specific rec 3","specific rec 4"]}`);
-  try{if(txt)return JSON.parse(txt);}catch(e){}
+function genFINCommentary(fin){
   return buildFINFallback(fin);
 }
 
@@ -811,8 +837,8 @@ async function genFINCommentary(fin){
 async function startFPA(){
   if(!S.fpaDemoOn&&(!S.bFile||!S.aFile)){toast('Upload both files or enable demo data','error');return;}
   g('fpaForm').style.display='none';g('fpaProc').style.display='block';
-  const steps=[['Uploading…','Preparing your files'],['Parsing…','Reading rows and columns'],['Calculating variances…','Running the variance engine'],['Generating commentary…','Building insights from your data']];
-  async function step(i){g('fpaSt').textContent=steps[i][0];g('fpaDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,i===3?600:420));}
+  const steps=[['Uploading…','Preparing your files'],['Parsing…','Reading rows and columns'],['Calculating variances…','Running the variance engine'],['Building report…','Compiling your insights']];
+  async function step(i){g('fpaSt').textContent=steps[i][0];g('fpaDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,420));}
   for(let i=0;i<4;i++)await step(i);
   let data=S.fpaDemoOn?FPA_DEMO:null;
   if(!data){
@@ -822,7 +848,7 @@ async function startFPA(){
     }catch(e){toast('Error reading files — using demo data','error');data=FPA_DEMO;}
   }
   const analysis=calcFPA(data);
-  const commentary=await genFPACommentary(analysis);
+  const commentary=genFPACommentary(analysis);
   S.fpaReport={analysis,commentary,at:new Date()};
   g('fpaForm').style.display='block';g('fpaProc').style.display='none';
   toast('FP&A Report ready!','success');
@@ -836,13 +862,13 @@ async function startFPA(){
 async function startFIN(){
   if(!S.finDemoOn&&!S.finFile){toast('Upload a file or enable demo data','error');return;}
   g('finForm').style.display='none';g('finProc').style.display='block';
-  const steps=[['Uploading…','Preparing your data'],['Detecting format…','Parsing columns and periods'],['Running analysis…','Trend, margin & cost calculations'],['Detecting anomalies…','Scanning for unusual patterns'],['Generating insights…','Building insights from your data']];
-  async function step(i){g('finSt').textContent=steps[i][0];g('finDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,i===4?700:380));}
+  const steps=[['Uploading…','Preparing your data'],['Detecting format…','Parsing columns and periods'],['Running analysis…','Trend, margin & cost calculations'],['Detecting anomalies…','Scanning for unusual patterns'],['Building report…','Compiling your insights']];
+  async function step(i){g('finSt').textContent=steps[i][0];g('finDsc').textContent=steps[i][1];await new Promise(r=>setTimeout(r,380));}
   for(let i=0;i<5;i++)await step(i);
   let raw=S.finDemoOn?FIN_DEMO:null;
   if(!raw){try{raw=await readFile(S.finFile);}catch(e){toast('Error reading file — using demo data','error');raw=FIN_DEMO;}}
   const fin=calcFIN(raw);
-  const insights=await genFINCommentary(fin);
+  const insights=genFINCommentary(fin);
   S.finReport={fin,insights,at:new Date()};
   g('finForm').style.display='block';g('finProc').style.display='none';
   toast('Financial Analysis ready!','success');
@@ -973,17 +999,21 @@ function renderFinTabs(){
   if(!S.finReport)return;
   const{fin,insights,at}=S.finReport;
   const pd=fin.periodData,last=pd[pd.length-1]||{revenue:0,grossMargin:0,opMargin:0,costs:0};
-  const prev=pd[pd.length-2]||last;
-  const revGrowth=prev.revenue?((last.revenue-prev.revenue)/Math.abs(prev.revenue))*100:0;
+  const prev=pd[pd.length-2]||null;
+  const revGrowth=prev&&prev.revenue?((last.revenue-prev.revenue)/Math.abs(prev.revenue))*100:0;
+  const gmDiff=prev?(last.grossMargin-prev.grossMargin):0;
+  const omDiff=prev?(last.opMargin-prev.opMargin):0;
+  // Use totalRev across all periods for the "Total Revenue" KPI — more meaningful than just last period
+  const displayRev=fin.totalRev||last.revenue;
 
   g('finRH').textContent=insights.headline||'Financial Analysis Report';
   g('finRM').textContent=`Generated ${at?.toLocaleString()} · ${fin.periods.join(' · ')}`;
   g('finDiag').textContent=insights.diagnostic;
 
   g('finKPIs').innerHTML=[
-    {l:'Latest Revenue',v:fK(last.revenue),s:fP(revGrowth)+' period growth',c:clr(revGrowth)},
-    {l:'Gross Margin',v:fX(last.grossMargin),s:fP(last.grossMargin-prev.grossMargin)+'pp vs prior',c:clr(last.grossMargin-prev.grossMargin)},
-    {l:'Operating Margin',v:fX(last.opMargin),s:fP(last.opMargin-prev.opMargin)+'pp vs prior',c:clr(last.opMargin-prev.opMargin)},
+    {l:'Total Revenue',v:fK(displayRev),s:pd.length>1?fP(revGrowth)+' latest vs prior period':'Across '+fin.periods.length+' period'+(fin.periods.length===1?'':'s'),c:clr(revGrowth)},
+    {l:'Gross Margin',v:fX(last.grossMargin),s:prev?fP(gmDiff)+'pp vs prior period':'Latest period',c:gmDiff>=0?'var(--grn)':'var(--red)'},
+    {l:'Operating Margin',v:fX(last.opMargin),s:prev?fP(omDiff)+'pp vs prior period':'Latest period',c:omDiff>=0?'var(--grn)':'var(--red)'},
     {l:'Total Costs',v:fK(last.costs),s:fX(last.revenue?last.costs/last.revenue*100:0)+' of revenue',c:'var(--amb)'},
   ].map(x=>`<div class="card kc"><div class="kl">${x.l}</div><div class="kv" style="color:${x.c}">${x.v}</div><div class="ks" style="color:${x.c==='var(--txt)'?'var(--mut)':x.c}">${x.s}</div></div>`).join('');
 
@@ -1165,7 +1195,7 @@ async function sendChat(){
   if(S.chatMode==='fin'&&S.finReport){const l=S.finReport.fin.periodData[S.finReport.fin.periodData.length-1]||{};ctx=`Financial Analysis: Revenue ${fK(l.revenue)}, Gross Margin ${fX(l.grossMargin)}, Operating Margin ${fX(l.opMargin)}. ${S.finReport.insights.diagnostic}`;}
   const txt=await callAPI(`You are a concise professional financial analyst. 2-4 sentences max unless asked for more. Context: ${ctx}`,[...S.chatHist.slice(-8)].map(m=>m.content).join('\n'));
   g('typingDot')?.remove();
-  const reply=txt||'The commentary engine is running in offline mode. Based on the data: '+ctx;
+  const reply=txt||`Based on the data: ${ctx} — I'm running in offline mode on this deployment. For live chat responses, connect this app to a backend API proxy.`;
   S.chatHist.push({role:'assistant',content:reply});
   addBub(reply,'a');
 }
